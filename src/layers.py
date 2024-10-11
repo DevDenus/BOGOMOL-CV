@@ -1,9 +1,6 @@
-from random import getrandbits, randint
-
 import numpy as np
 
-from src.utils import bin_mat_mul
-
+from src.utils import bin_matmul
 
 class BDenseLayer:
     """
@@ -117,7 +114,7 @@ class BDenseLayer:
         input_data : np.array
         Using bitwise AND as an alternative of scalar vector multiplication
         """
-        prediction = (bin_mat_mul(self.weights, input_data) + self.bias) % 2
+        prediction = (bin_matmul(input_data, self.weights.T) + self.bias) % 2
         if self.trainable:
             self.cached_x = input_data
         return prediction
