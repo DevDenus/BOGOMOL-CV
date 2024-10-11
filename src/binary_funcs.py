@@ -37,7 +37,11 @@ class SecondDegreeZhegalkinPolynomial:
         # Used to store constant term of polynomial in polynomials coefficient matrix
         x = np.concat([x, np.ones((x.shape[0], 1))], axis=1)
         x = np.array(x, dtype=np.bool_)     # dtype=np.bool_ raise an exception in concat
-        result = bin_matmul(bin_matmul(x, self.polynomial_coefficients), x.T)
+        result = np.concat(
+            [bin_matmul(bin_matmul(x[i].reshape(1, -1), self.polynomial_coefficients), x[i].reshape(1, -1).T) for i in range(x.shape[0])],
+            axis=0
+        )
+        result = np.array(result, dtype=np.bool_)
         return result
 
     def __str__(self) -> str:
