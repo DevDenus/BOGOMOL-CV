@@ -2,6 +2,7 @@ import numpy as np
 
 from tqdm import tqdm
 
+# TODO: Refactor BModel class to be flexible enough for layers other than BDenseLayer
 class BModel:
     """
     Sequential binary model
@@ -34,8 +35,6 @@ class BModel:
 
         return batch_features, batch_targets
 
-    # FIXME Instability of learning discovered, possibly
-    # it has to be related to temperature
     def __anneal_backward_pass(self, input_data : np.array, labels : np.array, meta_parameter_size : int, epoch : int) -> float:
         """
         Realization of annealing stochastic learning method.
@@ -51,36 +50,18 @@ class BModel:
                 continue
             meta_parameters = self.layers[layer_index].generate_meta_parameters(meta_parameter_size)
             for meta_parameter_index in range(len(meta_parameters)):
-                self.layers[layer_index].anneal_weights(meta_parameter_index)
+                self.layers[layer_index].anneal(meta_parameter_index)
                 prediction = self.__predict_from_cached(layer_index)
                 new_loss = self.loss_fn(prediction, labels)
                 #print(1, loss - new_loss)
                 if loss < new_loss:
-                    # temperature = 1 / (1 + epoch*np.log2(1 + epoch))
-                    temperature = np.pow(0.9, epoch)
-                    transition_probability = np.exp(-(new_loss-loss)/temperature)
-                    prob = np.random.uniform(0, 1)
-                    # print(transition_probability, prob, prob < transition_probability)
-                    if prob < transition_probability:
-                        loss = new_loss
-                    else:
-                        self.layers[layer_index].set_cached_weights()
-                else:
-                    loss = new_loss
-
-                self.layers[layer_index].anneal_bias(meta_parameter_index)
-                prediction = self.__predict_from_cached(layer_index)
-                new_loss = self.loss_fn(prediction, labels)
-                #print(2, loss - new_loss)
-                if loss < new_loss:
-                    #temperature = 1 / (1 + epoch * np.log2(1 + epoch))
-                    temperature = np.pow(0.9, epoch)
+                    temperature = 1 / (1 + epoch*np.log2(1 + epoch))
                     transition_probability = np.exp(-(new_loss-loss)/temperature)
                     prob = np.random.uniform(0, 1)
                     if prob < transition_probability:
                         loss = new_loss
                     else:
-                        self.layers[layer_index].set_cached_bias()
+                        self.layers[layer_index].set_cached_parameters(meta_parameter_index)
                 else:
                     loss = new_loss
         return loss

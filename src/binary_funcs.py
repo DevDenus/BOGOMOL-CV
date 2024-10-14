@@ -39,9 +39,9 @@ class SecondDegreeZhegalkinPolynomial:
         x = np.array(x, dtype=np.bool_)     # dtype=np.bool_ raise an exception in concat
         result = np.concat(
             [bin_matmul(bin_matmul(x[i].reshape(1, -1), self.polynomial_coefficients), x[i].reshape(1, -1).T) for i in range(x.shape[0])],
-            axis=0
+            axis=0,
+            dtype=np.bool_
         )
-        result = np.array(result, dtype=np.bool_)
         return result
 
     def __str__(self) -> str:
@@ -57,7 +57,7 @@ class SecondDegreeZhegalkinPolynomial:
         result += f"{int(self.polynomial_coefficients[self.dimension_size, self.dimension_size])}"
         return result
 
-    def anneal_coefficients(self):
+    def anneal(self):
         """
         Implementation of annealing simulation on polynomial coefficients
         """
@@ -71,7 +71,7 @@ class SecondDegreeZhegalkinPolynomial:
         )
         return self
 
-    def set_cached_coefficients(self):
+    def set_cached_parameters(self):
         """
         Sets coefficients to previously cached ones
         """
