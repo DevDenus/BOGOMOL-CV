@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.utils import bin_matmul
+from modules.utils import bin_matmul
 
 # TODO: Replace polynomial coefficients matrix of (dimension_size+1)^2
 # elements with some smarter data structure with dimension_size*(dimension_size+1)/2 + 1

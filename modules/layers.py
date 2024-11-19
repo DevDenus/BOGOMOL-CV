@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.utils import bin_matmul
+from modules.utils import bin_matmul
 
 class BFuncLayer:
     """
