@@ -2,6 +2,7 @@ numpy
 pandas
 matplotlib
 tqdm
+jupyter
 ipykernel
 scikit-learn
 torch

@@ -129,14 +129,14 @@ class BConvAttention2d(nn.Module):
             torch.empty(out_channels, in_channels, output_kernel[0], output_kernel[1])
         )
 
-        nn.init.xavier_uniform_(self.patch_filters)
-        nn.init.xavier_uniform_(self.output_filters)
+        nn.init.kaiming_normal_(self.patch_filters)
+        nn.init.kaiming_normal_(self.output_filters)
 
-    def forward(self, input : Tensor, k : Tensor, t : Tensor) -> Tensor:
+    def forward(self, input : Tensor, a : Tensor) -> Tensor:
         assert input.shape[-2] <= self.max_input_height
         assert input.shape[-1] <= self.max_input_width
-        binput = BinarySignEdeFn.apply(input, k, t)
-        bpatch_filters = BinarySignEdeFn.apply(self.patch_filters, k, t)
+        binput = BinarySignEdeFn.apply(input, a)
+        bpatch_filters = BinarySignEdeFn.apply(self.patch_filters, a)
         padded_binput = F.pad(binput,
             (0, self.max_input_height - input.shape[-2], 0, self.max_input_width - input.shape[-1])
         )
@@ -144,8 +144,8 @@ class BConvAttention2d(nn.Module):
             padded_binput, bpatch_filters,
             self.patch_size, self.patch_stride, self.padding, self.stride
         )
-        bself_attention = BinarySignEdeFn.apply(self_attention, k, t)
-        boutput_filters = BinarySignEdeFn.apply(self.output_filters, k, t)
+        bself_attention = BinarySignEdeFn.apply(self_attention, a)
+        boutput_filters = BinarySignEdeFn.apply(self.output_filters, a)
         output = F.conv2d(
             bself_attention, boutput_filters,
             stride=self.stride, padding=self.padding
