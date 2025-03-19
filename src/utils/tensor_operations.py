@@ -11,7 +11,7 @@ def tensor_to_patches1d(tensor : Tensor, patch_size : int, stride : int) -> Tens
     input:
         tensor (Tensor): Tensor of size [batch_size, channels, length].
         patch_length (int): Patch length.
-        stride (int, optional): stride between patches, if None - stride = patch_length.
+        stride (int): stride between patches.
 
     returns:
         Tensor: Tensor of patches [batch_size, num_patches, channels, patch_length],
@@ -35,7 +35,7 @@ def patches_to_tensor1d(patches : Tensor, original_size : int, stride : int) -> 
     input:
         patches (Tensor): Tensor of size [batch_size, num_patches, channels, patch_length].
         original_size (int): Input length.
-        stride (int, optional): stride between patches, if None - stride = patch_length.
+        stride (int): stride between patches.
 
     returns:
         Tensor: Input tensor of patches [batch_size, channels, length]
@@ -56,34 +56,44 @@ def patches_to_tensor1d(patches : Tensor, original_size : int, stride : int) -> 
     return tensor.squeeze(-1)
 
 
-def tensor_to_patches2d(tensor : Tensor, patch_size: Tuple[int, int], stride : Tuple[int, int]) -> Tensor:
+def tensor_to_patches2d(tensor : Tensor, patch_size: Tuple[int, int], stride : Tuple[int, int], eps : float = 1e-5) -> Tuple[Tensor, Tensor]:
     """
     Splits the batch of images into fixed-sized patches.
 
     input:
         tensor (Tensor): Tensor of shape [batch_size, channels, height, width].
         patch_size (tuple): Patch size (patch_height, patch_width).
-        stride (tuple, optional): stride between patches (stride_height, stride_width).
-            If None, then stride = patch_size.
+        stride (tuple): stride between patches (stride_height, stride_width).
 
     return:
         Tensor: Tensor of patches [batch_size, num_patches, channels, patch_height, patch_width],
             where num_patches = ((height - patch_height) // stride_height + 1) * ((width - patch_width) // stride_width + 1).
+        Tensor: Overlap map, showing how many times each element was used in forming a patch
+            [batch_size, channels, height, width]
     """
     assert stride is not None
 
     batch_size, channels, height, width = tensor.shape
     patch_height, patch_width = patch_size
 
-    patches = F.unfold(tensor, kernel_size=(patch_height, patch_width), stride=stride)
-    # [batch_size, channels * patch_height * patch_width, num_patches]
-    patches = patches.reshape(batch_size, channels, patch_height, patch_width, -1)
-    # [batch_size, channels, patch_height, patch_width, num_patches]
-    patches = patches.permute(0, 4, 1, 2, 3)
-    # [batch_size, num_patches, channels, patch_height, patch_width]
-    return patches
+    # Computing overlap map
+    ones = torch.ones_like(tensor)
+    ones_unfolded = F.unfold(ones, kernel_size=(patch_height, patch_width), stride=stride)
+    overlap_map = F.fold(ones_unfolded, output_size=(height, width), kernel_size=(patch_height, patch_width), stride=stride)
 
-def patches_to_tensor2d(patches : Tensor, original_size: Tuple[int, int], stride : Tuple[int, int]) -> Tensor:
+    # Normalizing input tensor to avoid gradient imbalance
+    normalized_tensor = tensor / (overlap_map + eps)
+
+    patches = F.unfold(normalized_tensor, kernel_size=(patch_height, patch_width), stride=stride)
+    # [batch_size, channels * patch_height * patch_width, num_patches]
+    patches = patches.view(batch_size, channels, patch_height, patch_width, -1)
+    # [batch_size, channels, patch_height, patch_width, num_patches]
+    patches = patches.permute(0, 4, 1, 2, 3).contiguous()
+    # [batch_size, num_patches, channels, patch_height, patch_width]
+
+    return patches, overlap_map
+
+def patches_to_tensor2d(patches : Tensor, overlap_map : Tensor, original_size: Tuple[int, int], stride : Tuple[int, int], eps : float = 1e-5) -> Tensor:
     """
     The inverse operation of tensor_to_patches2d.
     Used to restore gradient of input from gradient of patches.
@@ -91,7 +101,7 @@ def patches_to_tensor2d(patches : Tensor, original_size: Tuple[int, int], stride
     input:
         patches (Tensor): Tensor of size [batch_size, num_patches, channels, patch_height, patch_width].
         original_size (tuple): Input size.
-        stride (tuple, optional): stride between patches, if None - stride = patch_length.
+        stride (tuple): stride between patches.
 
     returns:
         Tensor: Input tensor of patches [batch_size, channels, height, width]
@@ -100,51 +110,19 @@ def patches_to_tensor2d(patches : Tensor, original_size: Tuple[int, int], stride
 
     batch_size, num_patches, channels, patch_height, patch_width = patches.shape
 
-    patches = patches.permute(0, 2, 3, 4, 1)
+    patches = patches.permute(0, 2, 3, 4, 1).contiguous()
     # [batch_size, channels, patch_height, patch_width, num_patches]
-    tensor = patches.reshape(batch_size, channels * patch_height * patch_width, num_patches)
+    tensor = patches.view(batch_size, channels * patch_height * patch_width, num_patches)
 
     tensor = F.fold(
         tensor, output_size=original_size,
         kernel_size=(patch_height, patch_width), stride=stride
-    )
+    ).squeeze(-1)
     # [batch_size, channels, original_size[0], original_size[1]]
 
-    return tensor.squeeze(-1)
+    normalized_tensor = tensor / (overlap_map + eps)
 
-# TODO: Develop after PyTorch release torch.nn.Unfold for 3D image like tensors
-def tensor_to_patches3d(tensor : Tensor, patch_size : Tuple[int, int, int], stride : Optional[Tuple[int, int, int]] = None) -> Tensor:
-    """
-    Splits batch of 3D images into fixed-sized patches of 3D images.
-
-    input:
-        tensor (Tensor): Tensor of 3D images [batch_size, channels, depth, height, width].
-        patch_size (tuple): Patch size (patch_depth, patch_height, patch_width).
-        stride (tuple, optional): stride between patches (stride_depth, stride_height, stride_width).
-            If None, then stride = (patch_depth, patch_height, patch_width).
-
-    return:
-        Tensor: Tensor of patches [batch_size, num_patches, channels, patch_depth, patch_height, patch_width],
-            where num_patches = ((depth - patch_depth) // stride_depth + 1) *
-            ((height - patch_height) // stride_height + 1) * ((width - patch_width) // stride_width + 1).
-    """
-    pass
-
-# TODO: Develop after PyTorch release torch.nn.Fold for 3D image like tensors
-def patches_to_tensor3d(patches : Tensor, original_size : Tuple[int, int, int], stride : Optional[Tuple[int, int, int]] = None) -> Tensor:
-    """
-    The inverse operation of tensor_to_patches3d.
-    Used to restore gradient of input from gradient of patches.
-
-    input:
-        patches (Tensor): Tensor of size [batch_size, num_patches, channels, patch_depth, patch_height, patch_width].
-        original_size (tuple): Input shape.
-        stride (tuple, optional): stride between patches, if None - stride = (patch_depth, patch_height, patch_width).
-
-    returns:
-        Tensor: Input tensor of patches [batch_size, channels, depth, height, width]
-    """
-    pass
+    return normalized_tensor
 
 if __name__ == '__main__':
     batch_size = 1
