@@ -40,14 +40,14 @@ class SelfConv2d(Function):
         ctx.patch_stride = patch_stride
 
         # Forming patches
-        patches, overlap_map = tensor_to_patches2d(input, patch_size, patch_stride)
+        patches = tensor_to_patches2d(input, patch_size, patch_stride)
         # [batch_size, num_patches, channels, patch_height, patch_width]
         num_patches = patches.shape[-4]
 
         # Performing filtration
         reshaped_patches = patches.view(batch_size*num_patches, channels, patch_size[0], patch_size[1])
         biased_patches = reshaped_patches + filter_bias
-        filtered_patches = torch.tanh(biased_patches)
+        filtered_patches = torch.relu(biased_patches)
         weighted_filtered_patches = filter_weights * filtered_patches
 
         # Compressing patches to a Tensor of specified shape
@@ -57,7 +57,7 @@ class SelfConv2d(Function):
             batch_size*channels, num_patches, patch_size[0], patch_size[1]
         )
         compressor_kernel = compressor.unsqueeze(0).expand(num_patches, -1, -1, -1).transpose(0, 1).contiguous()
-        compressed_patches = F.conv2d(reshaped_weighted_filtered_patches, compressor_kernel) / num_patches
+        compressed_patches = F.conv2d(reshaped_weighted_filtered_patches, compressor_kernel)
         # [batch_size*channels, entities, patch_height', patch_width']
 
         # Convolving input tensor with compressed patches
@@ -73,7 +73,7 @@ class SelfConv2d(Function):
         output = output.view(batch_size, entities, output.shape[-2], output.shape[-1]).contiguous()
 
         ctx.save_for_backward(
-            reshaped_input, reshaped_compressed_patches, reshaped_weighted_filtered_patches, compressor_kernel, filtered_patches, filter_weights, reshaped_patches, overlap_map
+            reshaped_input, reshaped_compressed_patches, reshaped_weighted_filtered_patches, compressor_kernel, filtered_patches, filter_weights
         )
         return output
 
@@ -86,7 +86,7 @@ class SelfConv2d(Function):
         padding = ctx.padding
         stride = ctx.stride
         patch_stride = ctx.patch_stride
-        reshaped_input, reshaped_compressed_patches, reshaped_weighted_filtered_patches, compressor_kernel, filtered_patches, filter_weights, reshaped_patches, overlap_map = ctx.saved_tensors
+        reshaped_input, reshaped_compressed_patches, reshaped_weighted_filtered_patches, compressor_kernel, filtered_patches, filter_weights = ctx.saved_tensors
         _, _, height, width = reshaped_input.shape
         entities, num_patches, comp_height, comp_width = compressor_kernel.shape
         #print("num_patches", num_patches)
@@ -113,7 +113,7 @@ class SelfConv2d(Function):
             batch_size, entities, channels, comp_patches_height, comp_patches_width
         ).transpose(1, 2).contiguous().view(
             batch_size*channels, entities, comp_patches_height, comp_patches_width
-        ) / num_patches
+        )
         #print("grad_input", grad_input)
         #print("grad_compressed_patches", grad_compressed_patches)
 
@@ -126,15 +126,15 @@ class SelfConv2d(Function):
         )
         grad_compressor = F.grad.conv2d_weight(
             reshaped_weighted_filtered_patches, compressor_kernel.shape, grad_compressed_patches
-        ).mean(1)
+        ).sum(1)
         #print("grad_weighted_filtered_patches", grad_weighted_filtered_patches)
         #print("grad_compressor", grad_compressor)
 
-        grad_filtered_patches = filter_weights * (1 - torch.pow(filtered_patches, 2)) * grad_weighted_filtered_patches
-        grad_filter_weights = (grad_weighted_filtered_patches * filtered_patches).mean(0)
+        grad_filtered_patches = filter_weights * (filtered_patches > 0).to(filtered_patches.dtype) * grad_weighted_filtered_patches
+        grad_filter_weights = (grad_weighted_filtered_patches * filtered_patches).sum(0)
         #print("grad_filtered_patches", grad_filtered_patches)
         #print("grad_filter_weights", grad_filter_weights)
-        grad_filter_bias = grad_filtered_patches.mean(0)
+        grad_filter_bias = grad_filtered_patches.sum(0)
         grad_reshaped_patches = grad_filtered_patches
         #print("grad_filter_bias", grad_filter_bias)
 
@@ -144,7 +144,7 @@ class SelfConv2d(Function):
         )
         #print("grad_patches", grad_patches)
 
-        grad_input += patches_to_tensor2d(grad_patches, overlap_map, (height, width), patch_stride)
+        grad_input += patches_to_tensor2d(grad_patches, (height, width), patch_stride)
         #print("grad_input", grad_input)
         return grad_input, grad_filter_weights, grad_filter_bias, grad_compressor, None, None, None, None
 

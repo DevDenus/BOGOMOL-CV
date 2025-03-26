@@ -5,7 +5,6 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 
 import src.functions as func
-from src.quant.ops import Tanh2SignEde, ReLU2SignEde, Linear2SignEde
 
 
 class SelfConv2d(nn.Module):
@@ -32,14 +31,16 @@ class SelfConv2d(nn.Module):
             torch.empty(self.out_channels, self.compressor_size[0], self.compressor_size[1])
         )
 
-        nn.init.constant_(self.patch_weight, 1.)
+        nn.init.xavier_uniform_(self.patch_weight)
         nn.init.constant_(self.patch_bias, 0.)
-        nn.init.xavier_normal_(self.compressor)
+        nn.init.xavier_uniform_(self.compressor)
 
 
     def forward(self, input : Tensor) -> Tensor:
-        assert input.shape[-2] >= self.patch_size[0]
-        assert input.shape[-1] >= self.patch_size[1]
+        assert input.shape[-2] >= self.patch_size[0], \
+            f"Can't form patches of form {self.patch_size} out of input of form {(input.shape[-2], input.shape[-2])}"
+        assert input.shape[-1] >= self.patch_size[1], \
+            f"Can't form patches of form {self.patch_size} out of input of form {(input.shape[-2], input.shape[-2])}"
         self_attention = func.SelfConv2d.apply(
             input, self.patch_weight, self.patch_bias, self.compressor,
             self.patch_size, self.patch_stride, self.padding, self.stride

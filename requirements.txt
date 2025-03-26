@@ -4,9 +4,8 @@ matplotlib
 tqdm
 jupyter
 ipykernel
-scikit-learn
 torch
 torchvision
 torchsummary
 datasets
-brevitas
+timm
