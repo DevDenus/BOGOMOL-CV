@@ -2,124 +2,169 @@ from typing import Tuple, Optional
 
 import torch
 from torch import nn, Tensor
-from torch.nn import functional as F
+import torch.nn.functional as F
 
-import src.functions as func
+from src.utils.tensor_operations import tensor_to_patches2d
 
+class SE(nn.Module):
+    def __init__(self, in_channels : int, bottle_neck_coeff : int = 4):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, in_channels//bottle_neck_coeff, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels//bottle_neck_coeff, in_channels, 1), nn.Sigmoid()
+        )
+    def forward(self, x):
+        return x * self.fc(x)
 
-class SelfConv2d(nn.Module):
-    def __init__(self, in_channels : int, out_channels : int, patch_size : Tuple[int, int], compressor_size : Tuple[int, int], padding : Tuple[int, int] = (0, 0), stride : Tuple[int, int] = (1, 1), patch_stride : Optional[Tuple[int, int]] = None):
+class Bogomol(nn.Module):
+    def __init__(
+        self, input_dim : int, hidden_dim : int, output_dim : int, kernel_size : Tuple[int],
+        patch_size : Tuple[int], compressor_size : Tuple[int], padding : Tuple[int] = (0, 0),
+        patch_stride : Tuple[int] = None, num_heads : int = 4
+    ):
         super().__init__()
         if patch_stride is None:
             patch_stride = patch_size
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        self.kernel_size = kernel_size
         self.patch_size = patch_size
         self.compressor_size = compressor_size
-        self.patch_stride = patch_stride
+
+        self.patch_dim = output_dim * patch_size[0] * patch_size[1]
+        self.compressor_dim = output_dim * compressor_size[0] * compressor_size[1]
+
         self.padding = padding
-        self.stride = stride
+        self.patch_stride = patch_stride
 
-        self.patch_weight = nn.Parameter(
-            torch.empty(self.in_channels, self.patch_size[0], self.patch_size[1])
-        )
-        self.patch_bias = nn.Parameter(
-            torch.empty(self.in_channels, self.patch_size[0], self.patch_size[1])
-        )
-        self.compressor = nn.Parameter(
-            torch.empty(self.out_channels, self.compressor_size[0], self.compressor_size[1])
+        self.input_layer = nn.Sequential(
+            nn.GroupNorm(1, input_dim),
+            nn.Conv2d(
+                input_dim, output_dim, kernel_size,
+                padding=padding
+            ),
+            nn.GELU()
         )
 
-        nn.init.xavier_uniform_(self.patch_weight)
-        nn.init.constant_(self.patch_bias, 0.)
-        nn.init.xavier_uniform_(self.compressor)
+        self.position_embedding = nn.Sequential(
+            nn.Linear(2, hidden_dim),
+            nn.Tanh()
+        )
 
+        self.compress = nn.Sequential(
+            nn.Linear(self.patch_dim, hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        self.patch_attention = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=0.1, batch_first=True
+        )
+        self.non_linearity = nn.GELU()
+
+        self.basis_election = nn.Sequential(
+            nn.Linear(hidden_dim, compressor_size[0]*compressor_size[1]),
+            nn.Tanh()
+        )
+
+        self.patch_basis = nn.Parameter(
+            torch.empty(compressor_size[0]*compressor_size[1], self.compressor_dim)
+        )
+        nn.init.xavier_uniform_(self.patch_basis)
+
+        self.representation_election = nn.Sequential(
+            nn.Linear(hidden_dim, self.compressor_dim),
+            nn.GELU()
+        )
+
+        self.squeeze_excitation = SE(output_dim)
+        self.alpha = nn.Parameter(torch.tensor(.5))
 
     def forward(self, input : Tensor) -> Tensor:
-        assert input.shape[-2] >= self.patch_size[0], \
-            f"Can't form patches of form {self.patch_size} out of input of form {(input.shape[-2], input.shape[-2])}"
-        assert input.shape[-1] >= self.patch_size[1], \
-            f"Can't form patches of form {self.patch_size} out of input of form {(input.shape[-2], input.shape[-2])}"
-        self_attention = func.SelfConv2d.apply(
-            input, self.patch_weight, self.patch_bias, self.compressor,
-            self.patch_size, self.patch_stride, self.padding, self.stride
+        batch_size = input.shape[0]
+        input_features = self.input_layer(input)
+        _, _, feature_height, feature_width = input_features.shape
+
+        patches, patches_coords = tensor_to_patches2d(input_features, self.patch_size, self.patch_stride)
+
+        seq_length = patches.shape[1]
+
+        flat_patches = patches.view(
+            batch_size, seq_length, -1
         )
-        return self_attention
+        patch_emb = self.compress(flat_patches)
+        pos_emb = self.position_embedding(patches_coords)
+        patch_pos_emb = patch_emb + pos_emb
+        patch_attentive, _ = self.patch_attention(patch_pos_emb, patch_pos_emb, patch_pos_emb)
+        patch_attentive = self.non_linearity(patch_attentive)
 
-class BConvAttention2d(nn.Module):
-    def __init__(self, in_channels : int, out_channels : int, max_input_height : int, max_input_width : int,
-                 patch_size : Tuple[int, int], patch_kernel : Tuple[int, int], output_kernel : Tuple[int, int],
-                 padding : Tuple[int, int] = (0, 0), stride : Tuple[int, int] = (1, 1),
-                 patch_stride : Optional[Tuple[int, int]] = None):
-        super().__init__()
-        if patch_stride is None:
-            patch_stride = patch_size
+        patch_votes = self.basis_election(patch_attentive).mean(1).unsqueeze(-1)
+        basis_decision = patch_votes * self.patch_basis.unsqueeze(0).expand(batch_size, -1, -1)
 
-        self.quantizer = Linear2SignEde
+        #patches_representatives = self.form_representations(patches_decision.transpose(1, 2)).transpose(1, 2).contiguous()
+        represent_decision = self.representation_election(patch_attentive).mean(1).view(
+            batch_size, self.output_dim, self.compressor_size[0]*self.compressor_size[1]
+        )
+        patches_representatives = torch.bmm(represent_decision, basis_decision)
 
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.max_input_height = max_input_height
-        self.max_input_width = max_input_width
-        self.patch_size = patch_size
-        self.patch_kernel = patch_kernel
-        self.padding = padding
-        self.stride = stride
-        self.patch_stride = patch_stride
-
-        self.num_patches = ((max_input_height - patch_size[0]) // patch_stride[0] + 1) * ((max_input_width - patch_size[1]) // patch_stride[1] + 1)
-
-        self.patch_filters = nn.Parameter(
-            torch.empty(self.in_channels, self.num_patches, 1, self.patch_kernel[0], self.patch_kernel[1])
+        dynamic_filters = patches_representatives.view(
+            batch_size*self.output_dim, self.output_dim, self.compressor_size[0], self.compressor_size[1]
         )
 
-        self.output_filters = nn.Parameter(
-            torch.empty(out_channels, in_channels, output_kernel[0], output_kernel[1])
+        reshaped_input = input_features.view(
+            1, batch_size*self.output_dim, feature_height, feature_width
         )
+        self_conv = F.conv2d(
+            reshaped_input, dynamic_filters,
+            padding=self.padding, groups=batch_size
+        )
+        _, _, selfconv_height, selfconv_width = self_conv.shape
+        self_conv = self_conv.view(
+            batch_size, self.output_dim, selfconv_height, selfconv_width
+        )
+        return self.squeeze_excitation(self.alpha*input_features + self_conv)
 
-        nn.init.xavier_uniform_(self.patch_filters)
-        nn.init.xavier_uniform_(self.output_filters)
-
-    # def forward(self, input : Tensor, k : Tensor, t : Tensor) -> Tensor:
-    def forward(self, input : Tensor, a : Tensor) -> Tensor:
-        assert input.shape[-2] <= self.max_input_height
-        assert input.shape[-1] <= self.max_input_width
-        binput = self.quantizer.apply(input, a)
-        bpatch_filters = self.quantizer.apply(self.patch_filters, a)
-        padded_binput = F.pad(binput,
-            (0, self.max_input_height - input.shape[-2], 0, self.max_input_width - input.shape[-1])
-        )
-        self_attention = SelfConv2d.apply(
-            padded_binput, bpatch_filters,
-            self.patch_size, self.patch_stride, self.padding, self.stride
-        )
-        bself_attention = self.quantizer.apply(self_attention, a)
-        boutput_filters = self.quantizer.apply(self.output_filters, a)
-        output = F.conv2d(
-            bself_attention, boutput_filters,
-            stride=self.stride, padding=self.padding
-        )
-        return output
+    def flops(self, input : Tensor) -> int:
+        flops = 0
+        return flops
 
 
 if __name__ == "__main__":
     import time
 
-    batch_size = 32
-    channels = 3
-    height, width = 32, 32
-    tensor = torch.randn(batch_size, channels, height, width, requires_grad=True)
-    out_channels = 5
-    max_height, max_width = 32, 32
-    patch_size = (5, 5)
-    compressor_size = (3, 3)
+    batch_size = 4
+    channels = 32
+    height, width = 224, 224
+    tensor = torch.randn(batch_size, channels, height, width, requires_grad=True).to('cuda')
+    out_channels = 64
 
-    model2d = SelfConv2d(channels, out_channels, patch_size, compressor_size)
-    time_start = time.time()
-    y = model2d(tensor)
-    print(y.shape)
-    print(f"forward pass took {time.time()-time_start} second")
-    time_start = time.time()
-    loss = y.sum().backward()
-    print(f"backward pass took {time.time()-time_start} second")
+    kernel_size = (5, 5)
+    patch_size = (32, 32)
+    compressor_size = (5, 5)
+    patch_stride = (16, 16)
+    padding = (2, 2)
+
+    hidden_dim = 32
+
+    model2d = Bogomol(
+        channels, hidden_dim, out_channels,
+        kernel_size, patch_size, compressor_size,
+        padding, patch_stride
+    ).to('cuda')
+    print(f"MFLOPs: {model2d.flops(tensor.shape)/1e+6:.1f}")
+    forward_min_time = float('inf')
+    backward_min_time = float('inf')
+    for i in range(10):
+        tensor = torch.randn(batch_size, channels, height, width, requires_grad=True).to('cuda')
+        time_start = time.time()
+        y = model2d(tensor)
+        forward_min_time = min(forward_min_time, time.time()-time_start)
+        time_start = time.time()
+        loss = y.sum().backward()
+        backward_min_time = min(backward_min_time, time.time()-time_start)
+    # y_sample = model2d(tensor[0].unsqueeze(0))
+    # print(f"Not mixing samples: {(y[0] == y_sample).all()}")
+    print(f"forward pass took {forward_min_time} second")
+    print(f"backward pass took {backward_min_time} second")

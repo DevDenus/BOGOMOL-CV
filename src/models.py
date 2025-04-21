@@ -1,139 +1,106 @@
 from typing import Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn, Tensor
+from timm.layers.drop import DropPath
 
-from src.layers import SelfConv2d
+from src.layers import Bogomol
 
 class BogomolBlock(nn.Module):
     def __init__(
-        self, input_dim : int, hidden_dim : int, output_dim : int, blocks_count : int,
-        kernel_size : Tuple[int, int], patch_size : Tuple[int, int], compressor_size : Tuple[int, int],
-        padding : Tuple[int, int], stride : Tuple[int, int], patch_stride : Tuple[int, int]
-    ) -> None:
+        self, in_channels : int, hidden_dim : int, output_dim : int, block_len : int,
+        kernel_size : Tuple[int], patch_size : Tuple[int], compressor_size : Tuple[int],
+        padding : Tuple[int], patch_stride : Tuple[int], num_heads : int = 4
+    ):
         super().__init__()
+        self.bogomols = nn.ModuleList([
+            Bogomol(
+                in_channels, hidden_dim, in_channels,
+                kernel_size, patch_size, compressor_size,
+                padding, patch_stride, num_heads
+            ) for _ in range(block_len)
+        ])
 
-        self.input_layer = nn.Sequential(
+        self.alpha = nn.Parameter(torch.ones(block_len))
+        self.drop_path = DropPath(0.1)
+
+        self.output_transform = nn.Sequential(
+            nn.GroupNorm(1, in_channels),
             nn.Conv2d(
-                input_dim, hidden_dim, kernel_size,
-                stride, padding
-            ),
-            nn.InstanceNorm2d(hidden_dim, eps=1e-3),
-        )
-
-        self.blocks = []
-        for _ in range(blocks_count):
-            block = nn.Sequential(
-                SelfConv2d(
-                    hidden_dim, hidden_dim, patch_size, compressor_size,
-                    padding, stride, patch_stride
-                ),
-                nn.GELU(),
-                nn.Conv2d(
-                    hidden_dim, hidden_dim, kernel_size,
-                    stride, padding
-                ),
-                nn.InstanceNorm2d(hidden_dim, eps=1e-3),
+                in_channels, output_dim, 1,
+                (2, 2)
             )
-            self.blocks.append(block)
-
-        self.blocks = nn.ModuleList(self.blocks)
-
-
-        self.output = nn.Sequential(
-            SelfConv2d(
-                hidden_dim, output_dim, patch_size, compressor_size,
-                padding, stride, patch_stride
-            ),
-            nn.GELU(),
-            nn.MaxPool2d((2, 2))
         )
-
-        # self.scaling_factor = nn.Parameter(0.5*torch.ones(1, output_dim, 1, 1))
 
     def forward(self, input : Tensor) -> Tensor:
-        x = self.input_layer(input)
-        for block in self.blocks:
-            x = block(x) + x
-        output = self.output(x)
+        x = input
+        for i, bogomol in enumerate(self.bogomols):
+            x = x + self.alpha[i] * self.drop_path(bogomol(x))
+        output = self.output_transform(x)
         return output
 
 class ImageClassifier(nn.Module):
-    def __init__(self, input_size : Tuple[int], hidden_dim : int, output_dim : int, block_len : int = 5, blocks_count : int = 2) -> None:
+    def __init__(
+        self, in_channels : int, hidden_dim : int, output_dim : int, entities : int,
+        num_blocks : int = 2, block_len : int = 3, num_heads : int = 4,
+        operating_size : Tuple[int] = (32, 32)
+    ):
         super().__init__()
-        self.kernel_size = (5, 5)
-        self.patch_size = (7, 7)
-        self.compressor_size = (3, 3)
+        self.kernel_size = (7, 7)
+        self.patch_size = (8, 8)
+        self.compressor_size = (7, 7)
+        self.operating_size = operating_size
 
-        self.padding = (2, 2)
-        self.stride = (1, 1)
+        self.padding = (3, 3)
         self.patch_stride = (3, 3)
 
-        self.input_layer = BogomolBlock(input_size[0], hidden_dim, hidden_dim, block_len, self.kernel_size, self.patch_size, self.compressor_size, self.padding, self.stride, self.patch_stride)
+        self.input_layer = Bogomol(
+            in_channels, hidden_dim, entities,
+            self.kernel_size, self.patch_size, self.compressor_size,
+            self.padding, self.patch_stride, num_heads
+        )
 
-        output_size = self.__calculate_output_size((input_size[1], input_size[2]))
+        self.bogomol_blocks = nn.ModuleList([
+            BogomolBlock(
+                entities*2**i, hidden_dim, entities*2**(i+1), block_len,
+                self.kernel_size, self.patch_size, self.compressor_size,
+                self.padding, self.patch_stride, num_heads
+            ) for i in range(num_blocks)
+        ])
 
-        self.bogomol_blocks = []
-
-        for i in range(blocks_count):
-            self.bogomol_blocks.append(
-                BogomolBlock(
-                    hidden_dim*2**i, hidden_dim*2**(i+1), hidden_dim*2**(i+1),
-                    block_len, self.kernel_size, self.patch_size, self.compressor_size,
-                    self.padding, self.stride, self.patch_stride
-                )
-            )
-            output_size = self.__calculate_output_size(output_size)
-
-        self.bogomol_blocks = nn.ModuleList(self.bogomol_blocks)
+        flat_shape = entities*2**num_blocks * (operating_size[0]//2**num_blocks) * (operating_size[1]//2**num_blocks)
 
         self.flatten = nn.Flatten()
 
-        self.layer_norm = nn.LayerNorm(hidden_dim*(2**blocks_count)*output_size[0]*output_size[1], eps=1e-3)
+        self.normalize = nn.LayerNorm(flat_shape)
 
-        self.output = nn.Linear(hidden_dim*(2**blocks_count)*output_size[0]*output_size[1], output_dim)
-
-    def __calculate_output_size(self, input_size : Tuple[int, int]) -> Tuple[int, int]:
-        conv_size = (
-            (input_size[0] - self.kernel_size[0] + 2*self.padding[0])//self.stride[0] + 1,
-            (input_size[1] - self.kernel_size[1] + 2*self.padding[1])//self.stride[1] + 1
-        )
-        compressed_patch_size = (
-            self.patch_size[0] - self.compressor_size[0] + 1,
-            self.patch_size[1] - self.compressor_size[1] + 1
-        )
-        self_conv_size = (
-            (conv_size[0] - compressed_patch_size[0] + 2*self.padding[0])//self.stride[0] + 1,
-            (conv_size[1] - compressed_patch_size[1] + 2*self.padding[1])//self.stride[1] + 1
-        )
-        max_pool_size = (
-            self_conv_size[0] // 2,
-            self_conv_size[1] // 2
-        )
-        return max_pool_size
-
+        self.output = nn.Linear(flat_shape, output_dim)
 
     def forward(self, input : Tensor) -> Tensor:
         x = self.input_layer(input)
-        for bogomol in self.bogomol_blocks:
-            x = bogomol(x)
+        x = F.interpolate(x, self.operating_size, mode='bicubic')
+        for bogomol_block in self.bogomol_blocks:
+            x = bogomol_block(x)
         x = self.flatten(x)
-        #x = self.layer_norm(x)
-        #x = self.linear(x)
-        #x = self.activation(x)
-        x = self.layer_norm(x)
+        x = self.normalize(x)
         result = self.output(x)
         return result
 
+    def flops(self, input : Tensor) -> int:
+        flops = 0
+
+
 if __name__ == "__main__":
     import time
-    batch_size = 8
+    batch_size = 5
     channels, height, width = 3, 32, 32
     tensor = torch.randn((batch_size, channels, height, width), requires_grad=True).to("cuda")
-    hidden_dim = 32
+    hidden_dim = 64
+    entities = 32
     num_classes = 10
 
-    model = ImageClassifier((channels, height, width), hidden_dim, num_classes).to("cuda")
+    model = ImageClassifier(channels, hidden_dim, num_classes, entities, 3, 5, 8).to("cuda")
     time_start = time.time()
     y = model(tensor)
     print(y.shape)
