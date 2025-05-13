@@ -1,4 +1,4 @@
-from math import sqrt, log2
+from math import sqrt
 from typing import Tuple
 
 import torch
@@ -23,7 +23,7 @@ class BogomolBlock(nn.Module):
             max(int(self.patch_size[0]*patch_stride_ratio), 1),
             max(int(self.patch_size[1]*patch_stride_ratio), 1)
         )
-        self.hidden_dim = int(sqrt(in_channels*self.patch_size[0]*self.patch_size[1]))
+        self.hidden_dim = int(sqrt(in_channels * self.patch_size[0] * self.patch_size[1]))
 
         self.bogomols = nn.ModuleList([
             nn.Sequential(

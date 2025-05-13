@@ -1,5 +1,3 @@
-numpy
-pandas
 matplotlib
 tqdm
 jupyter
@@ -9,4 +7,3 @@ torchvision
 torchsummary
 datasets
 timm
-fvcore
