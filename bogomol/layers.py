@@ -1,4 +1,3 @@
-from math import log2
 from typing import Tuple
 
 import torch
@@ -18,6 +17,7 @@ class Bogomol(nn.Module):
         self.input_size = input_size
         self.patch_size = patch_size
         self.patch_stride = patch_stride
+        self.kernel_size = kernel_size
 
         self.patch_dim = input_dim * self.patch_size[0] * self.patch_size[1]
         self.num_patches = ((input_size[0] - self.patch_size[0]) // self.patch_stride[0] + 1) * \
@@ -39,21 +39,24 @@ class Bogomol(nn.Module):
         nn.init.xavier_normal_(self.patch_pos_emb)
 
         self.alpha = nn.Parameter(
-            torch.tensor((self.num_patches)**(-0.5))
+            torch.tensor(self.num_patches**(-0.5))
         )
         self.temp_dim = int(input_dim**0.5)
 
-        self.height_decompressor = nn.Linear(self.emb_dim, self.temp_dim*input_size[0])
-        self.width_decompressor = nn.Linear(self.emb_dim, self.temp_dim*input_size[1])
+        self.height_decompressor = nn.Linear(self.emb_dim, self.temp_dim*input_size[0], bias=False)
+        self.width_decompressor = nn.Linear(self.emb_dim, self.temp_dim*input_size[1], bias=False)
 
-        padding = (
+        self.padding = (
             kernel_size[0] // 2,
             kernel_size[1] // 2
         )
 
-        self.output_proj = nn.Conv2d(
-            self.temp_dim**2, output_dim, kernel_size,
-            padding=padding, bias=False
+        self.output_proj = nn.Sequential(
+            nn.GELU(),
+            nn.Conv2d(
+                self.temp_dim**2, output_dim, kernel_size,
+                padding=self.padding, bias=False
+            )
         )
 
     def forward(self, input : Tensor) -> Tensor:
@@ -73,6 +76,15 @@ class Bogomol(nn.Module):
         output = self.output_proj(context)
         return output
 
+    def flops(self):
+        form_query_flops = 2 * self.num_patches * self.patch_dim*self.emb_dim + 7*self.num_patches*self.emb_dim
+        form_key_flops = form_query_flops
+        matmul_flops = 2 * self.emb_dim**2 * self.num_patches + self.emb_dim**2
+        decompressor_flops = 2 * self.emb_dim**2 * self.temp_dim*self.input_size[0] + \
+            2 * self.temp_dim*self.input_size[0] * self.emb_dim * self.temp_dim*self.input_size[1]
+        conv_flops = 2 * self.temp_dim**2 * self.output_dim * self.input_size[0] * self.input_size[1] * self.kernel_size[0] * self.kernel_size[1]
+        total_flops = form_query_flops + form_key_flops + matmul_flops + decompressor_flops + conv_flops
+        return total_flops
 
 if __name__ == "__main__":
     import time
@@ -95,7 +107,7 @@ if __name__ == "__main__":
         (height, width), patch_size,
         kernel_size, patch_stride
     ).to('cuda')
-    #print(f"MFLOPs: {model2d.flops(tensor.shape)/1e+6:.1f}")
+    print(f"MFLOPs: {model2d.flops()/1e+6:.1f}")
     forward_min_time = float('inf')
     backward_min_time = float('inf')
     for i in range(10):
@@ -106,11 +118,5 @@ if __name__ == "__main__":
         time_start = time.time()
         loss = y.sum().backward()
         backward_min_time = min(backward_min_time, time.time()-time_start)
-    #model2d.eval()
-    #with torch.no_grad():
-    #    tensor = torch.randn(batch_size, channels, height, width, requires_grad=True, dtype=float).to('cuda')
-    #    y = model2d(tensor)
-    #    y_sample = model2d(tensor[0].unsqueeze(0))
-    #    print(f"Not mixing samples: {abs(y[0] - y_sample).max()}")
     print(f"forward pass took {forward_min_time} second")
     print(f"backward pass took {backward_min_time} second")
